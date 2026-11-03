@@ -2975,9 +2975,7 @@ async fn authorize_moderation_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = crate::nip_fi_policy::mode(&state, &headers)
-        .await
-        .restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(state, headers).await.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     crate::nip_fi_shadow::observe_strict_proof(state, headers, "bridge", || {
