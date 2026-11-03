@@ -50,11 +50,17 @@ pub(crate) enum CommunityDisconnectReason {
     AuthorizationDenied,
     /// The authenticated pubkey lost access to the community (e.g. a ban).
     AccessRevoked,
+    /// The community now requires a newer enforced admission.
+    AuthPolicyUpgraded,
 }
 
 impl CommunityDisconnectReason {
     pub(crate) fn close_message(self) -> WsMessage {
         match self {
+            Self::AuthPolicyUpgraded => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("community authentication upgraded"),
+            })),
             Self::CommunityArchived => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
                 code: axum::extract::ws::close_code::POLICY,
                 reason: WsUtf8Bytes::from_static("community archived"),
@@ -285,6 +291,17 @@ impl CommunityConnectionControl {
     /// by `set_terminal_frame_sender`, then cancels.
     pub(crate) fn disconnect_nip_fi(&self) {
         self.publish_authorization_denied(crate::nip_fi_session::NipFiWsRoute::Audio, None);
+        self.cancel.cancel();
+    }
+
+    pub(crate) fn disconnect_auth_policy(&self) {
+        self.reason_tx.send_if_modified(|reason| {
+            if reason.is_some() {
+                return false;
+            }
+            *reason = Some(CommunityDisconnectReason::AuthPolicyUpgraded);
+            true
+        });
         self.cancel.cancel();
     }
 

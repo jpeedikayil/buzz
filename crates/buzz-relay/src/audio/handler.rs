@@ -201,10 +201,12 @@ pub async fn ws_audio_handler(
             &tenant.community().as_uuid().to_string(),
             admitted_generation,
         ) else {
+            crate::auth_activation::deny_upgraded_socket(socket).await;
             return;
         };
         if let Some(assertion) = &nip_fi_assertion {
             if !ticket.enforce_issuer(assertion.identity().issuer()) {
+                crate::auth_activation::deny_upgraded_socket(socket).await;
                 return;
             }
         }
@@ -274,7 +276,6 @@ pub(crate) async fn handle_audio_connection(
     connection_time: chrono::DateTime<chrono::Utc>,
 ) {
     let cancel = CancellationToken::new();
-    let _activation_cancel = crate::auth_activation::link_cancel(cancel.clone());
 
     // Fix 3: Arm the NIP-FI session gate and expiry task BEFORE the
     // `is_community_active` bootstrap await so the session deadline is
@@ -300,6 +301,7 @@ pub(crate) async fn handle_audio_connection(
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) =
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
     let control = CommunityConnectionControl::new(cancel);
+    let _activation_cancel = crate::auth_activation::link_cancel(control.clone());
     control.attach_nip_fi_shadow(nip_fi_shadow);
     // Its first verified AUTH writes it; else the read loop's end does.
     let shadow_line = shadow_line.map(Arc::new);
