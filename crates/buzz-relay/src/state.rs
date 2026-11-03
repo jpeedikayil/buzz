@@ -109,6 +109,7 @@ pub(crate) struct CommunityConnectionControl {
     pub(crate) handler_tasks: tokio_util::task::TaskTracker,
     cancel: CancellationToken,
     audio: bool,
+    activation_tracked: bool,
     reason_tx: watch::Sender<Option<CommunityDisconnectReason>>,
     /// NIP-42-proven pubkey plus the NIP-FI session it was admitted
     /// under; matched by the registry's `disconnect_nip_fi` scan.  [FI-TRACE-DENY-SET]
@@ -133,6 +134,7 @@ impl CommunityConnectionControl {
         Self {
             cancel,
             audio: false,
+            activation_tracked: crate::auth_activation::current_ticket().is_some(),
             reason_tx,
             handler_tasks: tokio_util::task::TaskTracker::new(),
             proven_identity: Arc::new(std::sync::RwLock::new(None)),
@@ -405,6 +407,7 @@ struct ConnEntry {
 /// registration cancels the token; archival before registration is observed by
 /// the revalidation. The returned guard removes the entry on every exit path.
 pub struct CommunityConnectionRegistry {
+    untracked_auth_requirements: dashmap::DashSet<CommunityId>,
     draining_audio: AtomicBool,
     connections: Arc<DashMap<Uuid, (CommunityId, CommunityConnectionControl)>>,
 }
@@ -419,6 +422,7 @@ impl CommunityConnectionRegistry {
     /// Creates an empty lifecycle registry.
     pub fn new() -> Self {
         Self {
+            untracked_auth_requirements: dashmap::DashSet::new(),
             draining_audio: AtomicBool::new(false),
             connections: Arc::new(DashMap::new()),
         }
@@ -438,10 +442,32 @@ impl CommunityConnectionRegistry {
         if control.audio && self.draining_audio.load(Ordering::SeqCst) {
             control.disconnect_restart();
         }
+        // A dark callback can have chosen bypass before the floor was observed.
+        // Pair insert/check here with insert/scan below so it cannot miss closure.
+        if !control.activation_tracked && self.untracked_auth_requirements.contains(&community_id) {
+            control.disconnect_auth_policy();
+        }
         CommunityConnectionGuard {
             connection_id,
             connections: Arc::clone(&self.connections),
         }
+    }
+
+    /// First durable observation closes this community's dark sockets. This is
+    /// a cancellation hint, not accounting, registration, an ACK or drain proof.
+    pub(crate) fn require_untracked_auth(&self, community_id: CommunityId) -> usize {
+        if !self.untracked_auth_requirements.insert(community_id) {
+            return 0;
+        }
+        let mut signalled = 0;
+        for entry in self.connections.iter() {
+            let (community, control) = entry.value();
+            if *community == community_id && !control.activation_tracked {
+                control.disconnect_auth_policy();
+                signalled += 1;
+            }
+        }
+        signalled
     }
 
     /// Stop this process's audio sockets, including upgrades racing shutdown.
