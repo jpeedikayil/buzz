@@ -66,20 +66,21 @@ final class NativeAddMembersSheetCoordinator: NSObject, UIAdaptivePresentationCo
       if request == session { picker?.update(data) }
       result(nil)
     case "dismiss":
-      if request == session { close(notify: false) }
-      result(nil)
+      if request == session { close(notify: false) { result(nil) } }
+      else { result(nil) }
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
-  private func close(notify: Bool) {
-    guard let request = session, let navigation else { return }
+  private func close(notify: Bool, completion: (() -> Void)? = nil) {
+    guard let request = session, let navigation else { completion?(); return }
     session = nil
     self.navigation = nil
     picker = nil
     navigation.dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in
       if notify { self?.channel.invokeMethod("closed", arguments: ["session": request]) }
+      completion?()
     }
   }
 
@@ -107,7 +108,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     }
   }
   private var groups: [(String, [[String: Any]])] {
-    if loading || loadError { return [] }
+    if atLimit || loading || loadError { return [] }
     return ["Your agents", "People", "Other agents"].compactMap { title in
       let matches = users.filter { ($0["group"] as? String ?? "People") == title }
       return matches.isEmpty ? nil : (title, matches)
@@ -116,6 +117,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   private func user(at indexPath: IndexPath) -> [String: Any] {
     indexPath.section == 0 ? selected[indexPath.row] : groups[indexPath.section - 1].1[indexPath.row]
   }
+  private var checkmarkAction: Bool { state["confirmWithCheckmark"] as? Bool == true }
+  private var atLimit: Bool { selected.count >= (state["selectionLimit"] as? Int ?? Int.max) }
   private var busy: Bool { state["submitting"] as? Bool == true }
   private var loading: Bool { state["loading"] as? Bool == true }
   private var loadError: Bool { state["loadError"] as? Bool == true }
@@ -127,7 +130,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     pageColor = Self.color(state["pageColor"]) ?? .systemGroupedBackground
     rowColor = Self.color(state["rowColor"]) ?? .secondarySystemGroupedBackground
     super.init(style: .insetGrouped)
-    title = "Add members"
+    title = state["title"] as? String ?? "Add members"
   }
 
   @available(*, unavailable)
@@ -152,6 +155,12 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     definesPresentationContext = true
     navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancel))
     navigationItem.rightBarButtonItem = UIBarButtonItem(title: "Add", style: .done, target: self, action: #selector(add))
+    if checkmarkAction {
+      navigationItem.leftBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "xmark"), style: .plain, target: self, action: #selector(cancel))
+      navigationItem.leftBarButtonItem?.accessibilityLabel = "Close"
+      navigationItem.rightBarButtonItem = UIBarButtonItem(image: UIImage(systemName: "checkmark"), style: .done, target: self, action: #selector(add))
+      navigationItem.rightBarButtonItem?.accessibilityLabel = "Create message"
+    }
     NavigationTopEdge.configure(tableView, item: navigationItem)
     applyState()
   }
@@ -173,7 +182,11 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     navigationController?.isModalInPresentation = busy
     navigationItem.leftBarButtonItem?.isEnabled = !busy
     navigationItem.rightBarButtonItem?.isEnabled = !busy && !selected.isEmpty
-    navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
+    if checkmarkAction {
+      navigationItem.rightBarButtonItem?.accessibilityLabel = busy ? "Creating message" : "Create message"
+    } else {
+      navigationItem.rightBarButtonItem?.title = busy ? "Adding…" : selected.isEmpty ? "Add" : "Add (\(selected.count))"
+    }
     search.searchBar.isUserInteractionEnabled = !busy
     tableView.reloadData()
     let error = state["error"] as? String ?? ""
@@ -225,12 +238,12 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     var content = cell.defaultContentConfiguration()
     var avatarRequest: (String, String)?
     var memberLabel: String?
-    if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
-      content.text = loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
+    if indexPath.section == 1 && (atLimit || loading || loadError || users.isEmpty) {
+      content.text = atLimit ? "DMs support up to nine people, including you." : loading ? "Searching…" : loadError ? "Couldn't load people or agents. Tap to retry." : "No matching people or agents."
       content.textProperties.color = .secondaryLabel
       content.textProperties.numberOfLines = 0
       cell.selectionStyle = loadError && !loading ? .default : .none
-      if loadError && !loading { cell.accessibilityTraits.insert(.button) }
+      if loadError && !loading && !atLimit { cell.accessibilityTraits.insert(.button) }
     } else {
       let user = user(at: indexPath)
       content.text = user["name"] as? String
@@ -274,8 +287,8 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
   override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     tableView.deselectRow(at: indexPath, animated: true)
     guard !busy else { return }
-    if indexPath.section == 1 && (loading || loadError || users.isEmpty) {
-      if loadError && !loading { send("retry", [:]) }
+    if indexPath.section == 1 && (atLimit || loading || loadError || users.isEmpty) {
+      if loadError && !loading && !atLimit { send("retry", [:]) }
       return
     }
     let user = user(at: indexPath)
