@@ -374,6 +374,7 @@ pub(crate) async fn handle_connection(
     };
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
+    let _activation_cancel = crate::auth_activation::link_cancel(cancel.clone());
 
     // Fix 3: Arm the NIP-FI gate and expiry task BEFORE the `is_community_active`
     // bootstrap await so the session deadline is enforced even when the DB check
@@ -761,6 +762,9 @@ async fn handle_active_connection(
             let _ = task.await;
         }
         let _ = auth_cancel_task.await;
+        conn.community_control.handler_tasks.close();
+        conn.community_control.handler_tasks.wait().await;
+        conn.nip_fi_gate.fence().await;
         crate::handlers::close::release_connection_subscriptions(&conn, &state).await;
         state.conn_manager.deregister(conn.conn_id);
         if let Some(auth_ctx) = authenticated {
@@ -1367,7 +1371,9 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 event_id = tracing::field::Empty,
                 kind = tracing::field::Empty,
             );
-            tokio::spawn(
+            let handler_tasks = conn.community_control.handler_tasks.clone();
+            crate::auth_activation::spawn_on(
+                &handler_tasks,
                 async move {
                     handlers::event::handle_event(event, conn, state).await;
                     drop(permit);
@@ -1397,7 +1403,9 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 }
             };
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            let handler_tasks = conn.community_control.handler_tasks.clone();
+            crate::auth_activation::spawn_on(
+                &handler_tasks,
                 async move {
                     handlers::req::handle_req(sub_id, filters, before_ids, conn, state).await;
                     drop(permit);
@@ -1424,7 +1432,9 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             };
             let span =
                 tracing::info_span!("ws.artifact_sync", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            let handler_tasks = conn.community_control.handler_tasks.clone();
+            crate::auth_activation::spawn_on(
+                &handler_tasks,
                 async move {
                     handlers::artifact_sync::handle_sync(sub_id, filter, conn, state, permit).await;
                 }
@@ -1445,7 +1455,9 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 }
             };
             let span = tracing::info_span!("ws.count", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            let handler_tasks = conn.community_control.handler_tasks.clone();
+            crate::auth_activation::spawn_on(
+                &handler_tasks,
                 async move {
                     handlers::count::handle_count(sub_id, filters, conn, state).await;
                     drop(permit);

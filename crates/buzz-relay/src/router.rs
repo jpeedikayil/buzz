@@ -192,7 +192,9 @@ async fn nip_fi_assertion_guard(
             // this is never an optional-policy fallback or a data admission.
             let mode = state.config.nip_fi.mode;
             let policy = crate::nip_fi_policy::Policy {
+                community_id: uuid::Uuid::nil(),
                 mode,
+                generation: 0,
                 required: mode.enforces(),
                 stored_required: false,
                 mapped: false,
@@ -223,11 +225,37 @@ async fn nip_fi_assertion_guard(
     if policy.stored_required && state.nip_fi_deny_map.is_none() {
         return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
     }
-    crate::nip_fi_policy::with_policy(
-        policy,
-        nip_fi_assertion_guard_with_policy(state, request, next, policy.mode),
+    let Some(ticket) = state
+        .auth_activation
+        .enter(&policy.community_id.to_string(), policy.generation)
+    else {
+        return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+    };
+    // Own the admitted handler independently of the HTTP client. A dropped
+    // service future must not erase accounting while a DB commit is in flight.
+    match tokio::spawn(
+        tracing::instrument::WithSubscriber::with_current_subscriber(
+            tracing::Instrument::in_current_span(crate::auth_activation::with_ticket(
+                ticket.clone(),
+                async move {
+                    let response = crate::nip_fi_policy::with_policy(
+                        policy,
+                        nip_fi_assertion_guard_with_policy(state, request, next, policy.mode),
+                    )
+                    .await;
+                    crate::auth_activation::retain_body(response, ticket)
+                },
+            )),
+        ),
     )
     .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::error!(%error,"admitted HTTP handler failed");
+            http_denial(buzz_auth::DenialClass::AuthorizationUnavailable)
+        }
+    }
 }
 
 async fn nip_fi_assertion_guard_with_policy(
@@ -257,13 +285,16 @@ async fn nip_fi_assertion_guard_with_policy(
     if mode.observes_only() {
         let label = crate::nip_fi_shadow::label(&community);
         let run = crate::nip_fi_http::with_resolved_community(community, next.run(request));
-        return crate::nip_fi_shadow::observe_guard(label, verdict, run).await;
+        return crate::nip_fi_shadow::observe_guard(label, verdict.map(drop), run).await;
     }
     match (verdict, community) {
-        (Ok(()), Ok(community)) => {
+        (Ok(assertion), Ok(community)) => {
+            if !crate::auth_activation::enforce_current(assertion.identity().issuer()) {
+                return http_denial(buzz_auth::DenialClass::AuthorizationUnavailable);
+            }
             crate::nip_fi_http::with_resolved_community(Ok(community), next.run(request)).await
         }
-        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(()), Err(class)) => {
+        (Err(crate::nip_fi_shadow::WouldDeny { class, .. }), _) | (Ok(_), Err(class)) => {
             http_denial(class)
         }
     }
@@ -280,7 +311,7 @@ fn nip_fi_guard_steps(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     community: Result<&buzz_auth::CommunityBinding, &buzz_auth::DenialClass>,
-) -> Result<(), crate::nip_fi_shadow::WouldDeny> {
+) -> Result<buzz_auth::VerifiedAssertion, crate::nip_fi_shadow::WouldDeny> {
     let community = community.map_err(|class| {
         crate::nip_fi_shadow::WouldDeny::new(
             crate::nip_fi_shadow::Stage::Community,
@@ -293,7 +324,6 @@ fn nip_fi_guard_steps(
         community,
         state.nip_fi_verifier.as_deref(),
     )
-    .map(drop)
     .map_err(crate::nip_fi_shadow::WouldDeny::assertion)
 }
 
@@ -806,11 +836,11 @@ async fn nip11_or_ws_handler(
     //
     // The NIP-FI upgrade gate runs above (before bind_community) so denied
     // upgrades skip the tenant lookup; the `Ok(ws)` backstop runs below.
-    let (tenant, bound_mode) = match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await
-    {
-        Ok(binding) => binding,
-        Err(response) => return response,
-    };
+    let (tenant, bound_mode, admitted_generation) =
+        match crate::nip_fi_policy::bind_for_upgrade(&state, raw_host).await {
+            Ok(binding) => binding,
+            Err(response) => return response,
+        };
     // An initially missing/optional host may have become required while the
     // early gate awaited. Only the policy read with the bound row authorizes
     // this socket; a shadow observation is not an enforced admission.
@@ -908,8 +938,22 @@ async fn nip11_or_ws_handler(
                 )
             });
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| {
-                    handle_connection(
+                .on_upgrade(move |socket| async move {
+                    let Some(ticket) = state.auth_activation.enter(
+                        &tenant.community().as_uuid().to_string(),
+                        admitted_generation,
+                    ) else {
+                        return;
+                    };
+                    if let Some(assertion) = &nip_fi_assertion {
+                        if !ticket.enforce_issuer(assertion.identity().issuer()) {
+                            return;
+                        }
+                    }
+                    let cancel = ticket.cancellation();
+                    // The handler owns cleanup after cancellation; do not drop it.
+                    let control = cancel.clone();
+                    let connection = handle_connection(
                         socket,
                         state,
                         addr,
@@ -918,7 +962,13 @@ async fn nip11_or_ws_handler(
                         shadow,
                         shadow_line,
                         connection_time,
-                    )
+                    );
+                    // Work remains owned until handler/output/subscription cleanup.
+                    crate::auth_activation::with_ticket(ticket, async move {
+                        connection.await;
+                        drop(control);
+                    })
+                    .await;
                 })
                 .into_response()
         }
@@ -2662,6 +2712,7 @@ mod tests {
     // isolated postgres lane so it has a real DB. It is gated `#[ignore]` so it
     // does not run in the unit-test lane where no DB is available.
     mod postgres_tests {
+        mod activation_postgres_tests;
         use super::*;
         use std::sync::Arc;
 

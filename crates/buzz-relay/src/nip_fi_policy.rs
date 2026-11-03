@@ -36,7 +36,9 @@ impl PolicySource for buzz_db::Db {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Policy {
+    pub community_id: uuid::Uuid,
     pub mode: NipFiMode,
+    pub generation: i64,
     pub required: bool,
     pub stored_required: bool,
     // False only for the guard's legacy rejection scope after an authoritative
@@ -85,12 +87,28 @@ pub(crate) async fn resolve(
             ))
         }
     };
+    if policy.requires_nip_fi {
+        state
+            .auth_activation
+            .require(&policy.community_id.to_string(), policy.policy_generation);
+    }
+    if policy.policy_generation
+        < state
+            .auth_activation
+            .floor(&policy.community_id.to_string())
+    {
+        return Err(crate::nip_fi_core::http_denial(
+            DenialClass::AuthorizationUnavailable,
+        ));
+    }
     tracing::trace!(
         generation = policy.policy_generation,
         "resolved community auth policy"
     );
     Ok(Policy {
+        community_id: policy.community_id,
         mode: effective(global, policy.requires_nip_fi),
+        generation: policy.policy_generation,
         required: policy.requires_nip_fi || global.enforces(),
         stored_required: policy.requires_nip_fi,
         mapped: true,
@@ -116,7 +134,7 @@ pub(crate) async fn mode(state: &crate::state::AppState, headers: &HeaderMap) ->
 pub(crate) async fn bind_for_upgrade(
     state: &crate::state::AppState,
     raw_host: &str,
-) -> Result<(buzz_core::tenant::TenantContext, NipFiMode), Response<Body>> {
+) -> Result<(buzz_core::tenant::TenantContext, NipFiMode, i64), Response<Body>> {
     let host = buzz_core::tenant::normalize_host(raw_host);
     if host.is_empty() {
         return Err(not_found());
@@ -132,7 +150,23 @@ pub(crate) async fn bind_for_upgrade(
         // failed lookup. Neither outcome can yield a tenant or an upgrade.
         _ => return Err(not_found()),
     };
+    if policy.requires_nip_fi {
+        state
+            .auth_activation
+            .require(&policy.community_id.to_string(), policy.policy_generation);
+    }
+    if policy.policy_generation
+        < state
+            .auth_activation
+            .floor(&policy.community_id.to_string())
+    {
+        return Err(crate::nip_fi_core::http_denial(
+            DenialClass::AuthorizationUnavailable,
+        ));
+    }
     let policy = Policy {
+        community_id: policy.community_id,
+        generation: policy.policy_generation,
         mode: effective(state.config.nip_fi.mode, policy.requires_nip_fi),
         required: policy.requires_nip_fi || state.config.nip_fi.mode.enforces(),
         stored_required: policy.requires_nip_fi,
@@ -141,6 +175,7 @@ pub(crate) async fn bind_for_upgrade(
     Ok((
         buzz_core::tenant::TenantContext::resolved(row.id, host),
         configured_mode(state, policy),
+        policy.generation,
     ))
 }
 
@@ -197,6 +232,7 @@ impl PolicySource for OptionalPolicy {
     ) -> BoxFuture<'a, Result<Option<CommunityAuthPolicy>, ()>> {
         async {
             Ok(Some(CommunityAuthPolicy {
+                community_id: uuid::Uuid::nil(),
                 requires_nip_fi: false,
                 policy_generation: 0,
             }))

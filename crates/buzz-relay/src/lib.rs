@@ -90,3 +90,5 @@ pub use state::AppState;
 
 /// Optional relay-signed verified profiles.
 pub mod verified_profiles;
+
+pub(crate) mod auth_activation;

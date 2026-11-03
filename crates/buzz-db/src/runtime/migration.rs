@@ -565,6 +565,9 @@ mod postgres_tests {
             "operator_listener_pubkeys",
             "operator_listener_outbox",
             "community_auth_upgrades",
+            "community_auth_baseline",
+            "community_auth_boots",
+            "community_auth_obligations",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -778,7 +781,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 81);
+        assert_eq!(migrations.len(), 82);
         for (index, migration) in migrations.iter().enumerate() {
             assert_eq!(migration.version, (index + 1) as i64);
         }
@@ -2891,6 +2894,9 @@ mod postgres_tests {
             "relay_admin_outbox",
             "relay_operator_audit",
             "community_auth_upgrades",
+            "community_auth_baseline",
+            "community_auth_boots",
+            "community_auth_obligations",
             "entity_deletion_approvals",
             "entity_deletion_requests",
             "artifact_heads",
