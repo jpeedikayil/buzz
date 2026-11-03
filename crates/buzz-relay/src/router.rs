@@ -384,10 +384,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/operator/communities/nip-fi-upgrade",
             get(api::operator::community_nip_fi_upgrade_status)
-                .post(api::operator::enable_community_nip_fi)
-                .layer(axum::middleware::map_response(
-                    api::operator::no_store_upgrade_response,
-                )),
+                .post(api::operator::enable_community_nip_fi),
         )
         .route(
             "/operator/communities/transfer",
@@ -501,6 +498,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn(track_metrics))
         .layer(http_trace_layer())
         .layer(build_cors_layer(&state.config.cors_origins))
+        // Outside all rejection-producing layers, including the API body limit.
+        .layer(middleware::from_fn(
+            api::operator::no_store_upgrade_response,
+        ))
 }
 
 fn http_trace_layer() -> TraceLayer<HttpMakeClassifier, fn(&Request<Body>) -> tracing::Span> {
