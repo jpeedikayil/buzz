@@ -316,7 +316,7 @@ pub(crate) async fn handle_audio_connection(
     // the inner handler drains it via ws_send.
     let (pre_terminal_ctrl_tx, pre_terminal_ctrl_rx) =
         tokio::sync::mpsc::channel::<axum::extract::ws::Message>(1);
-    let control = CommunityConnectionControl::new(cancel);
+    let control = CommunityConnectionControl::new_audio(cancel);
     let _activation_cancel = crate::auth_activation::link_cancel(control.clone());
     control.attach_nip_fi_shadow(nip_fi_shadow);
     // Its first verified AUTH writes it; else the read loop's end does.
